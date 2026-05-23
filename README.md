@@ -2,7 +2,11 @@
 
 > **Cloud-hosted web environment on AWS with WAF configured for OWASP Top 10 detection/blocking, including SQLi, XSS, and automated bot traffic.**
 
+---
+
 ## Architecture
+
+Below is the Terraform resource graph for this infrastructure:
 
 ```
 Internet
@@ -12,32 +16,33 @@ AWS WAF (CloudFront scope)        ← OWASP rules, rate-limit, bot control
    │
    ▼
 CloudFront (CDN + TLS termination)
-   ├── /api/*  ──────────────────► ALB
-   │                                │
-   │                            AWS WAF (Regional scope)
-   │                                │
-   │                            EC2 / ECS / Lambda
+   ├── /* (static) ──────────────► S3 (static assets, via OAC)
    │
-   └── /* (default) ─────────────► S3 (static assets, via OAC)
+   └── (future backend) ─────────► AWS WAF (Regional scope)
+                                          │
+                                         ALB
 ```
+
+The following is the static site currently served through this infrastructure:
+
+![Resume hosted on liewfuteck.com via CloudFront and S3](./pictures/resume.png)
 
 ### Components
 
 | Resource | Purpose |
 |---|---|
+| **VPC** | Isolated network with public subnets (ALB) and private subnets (future backends); single NAT Gateway for egress |
 | **S3** | Private bucket for static HTML/CSS/JS; served via CloudFront OAC (no public access) |
-| **CloudFront** | CDN, TLS 1.2+, HTTP→HTTPS redirect, two origins (S3 + ALB) |
-| **ALB** | Application Load Balancer; HTTPS listener with origin-verify header check |
-| **WAF (CloudFront)** | Protects the CDN edge — blocks before traffic reaches your origin |
-| **WAF (Regional/ALB)** | Second layer at the ALB; catches anything that bypasses CloudFront |
+| **CloudFront** | CDN, TLS 1.2+, HTTP→HTTPS redirect; serves static content from S3 |
+| **ALB** | Application Load Balancer provisioned for future backend use; protected by the `X-Origin-Verify` header to prevent direct access bypassing CloudFront |
+| **WAF (CloudFront)** | Protects the CDN edge — blocks threats before traffic reaches any origin |
+| **WAF (Regional/ALB)** | Second WAF layer at the ALB; defence-in-depth for any traffic that reaches the load balancer |
 | **CloudTrail** | Multi-region audit trail; management + S3 data events; logs to S3 + CloudWatch Logs |
-| **KMS** | Encryption key for all log buckets |
+| **KMS** | Customer-managed encryption key for all log buckets |
 
 ---
 
 ## WAF Rules
-
-Both WebACLs (CloudFront + ALB) contain identical rule sets:
 
 | Priority | Rule | Threat |
 |---|---|---|
@@ -46,73 +51,24 @@ Both WebACLs (CloudFront + ALB) contain identical rule sets:
 | 30 | `AWSManagedRulesSQLiRuleSet` | SQL injection |
 | 40 | `AWSManagedRulesKnownBadInputsRuleSet` | Log4Shell, SSRF, malformed input |
 | 50 | `AWSManagedRulesBotControlRuleSet` | Automated scrapers, credential stuffing |
-| 60 | `RateLimitPerIP` *(custom)* | 100 req / 5 min per source IP → HTTP 429 |
+| 60 | `RateLimitPerIP` *(custom)* | 2000 req / 5 min per source IP → HTTP 429 |
 
-> **Cost note:** Bot Control costs ~$10/month + $1/million requests on top of standard WAF pricing. Remove rule priority 50 if cost is a concern.
+![WAF Rules](./pictures/waf-rules.png)
+
+### WAF Logging
+
+WAF has also been integrated with Kinesis Firehose, allowing for analysis of blocked requests.
+
+![AWS WAF and Kinesis Integration](./pictures/webapp-prod-kinesis-integration.png)
+![Kinesis Firehose Dashboard](./pictures/Firehose%20stream%20metrics.png)
 
 ---
 
-## Prerequisites
+## Viewing Logs
 
-- Terraform ≥ 1.6
-- AWS CLI configured (`aws configure`)
-- An existing VPC with at least two public subnets
-- (Optional) ACM certificates for custom domains
-
-## Quick Start
-
-```bash
-# 1. Clone / copy project
-cd terraform-aws-waf
-
-# 2. Configure variables
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars – at minimum set vpc_id and public_subnet_ids
-
-# 3. Initialise
-terraform init
-
-# 4. Preview changes
-terraform plan
-
-# 5. Deploy (~5–10 minutes; CloudFront takes longest)
-terraform apply
-
-# 6. Get your CloudFront URL
-terraform output cloudfront_domain
-```
-
-## Deploying static content
-
-```bash
-# After apply, push your static files to S3
-aws s3 sync ./dist/ s3://$(terraform output -raw s3_bucket_name)/ --delete
-
-# Invalidate the CloudFront cache
-aws cloudfront create-invalidation \
-  --distribution-id $(terraform output -raw cloudfront_distribution_id) \
-  --paths "/*"
-```
-
-## Enabling HTTPS (recommended)
-
-1. **Request an ACM certificate** in the same region as your ALB (e.g. `ap-southeast-1`) for the ALB.
-2. **Request a second ACM certificate** in `us-east-1` for CloudFront.
-3. Add both ARNs and your domain aliases to `terraform.tfvars`:
-
-```hcl
-certificate_arn            = "arn:aws:acm:ap-southeast-1:ACCOUNT:certificate/..."
-cloudfront_certificate_arn = "arn:aws:acm:us-east-1:ACCOUNT:certificate/..."
-cloudfront_aliases         = ["www.example.com"]
-```
-
-## Viewing logs
-
-**WAF logs** – stored in `aws-waf-logs-<project>-<env>` S3 bucket. Query with Athena:
+**WAF logs** – stored in the `aws-waf-logs-<project>-<env>` S3 bucket. Query with Athena:
 
 ```sql
--- Athena table DDL is auto-generated when you enable WAF logging in the console,
--- or create it manually pointing at the S3 prefix.
 SELECT timestamp, action, httprequest.clientip, httprequest.uri
 FROM waf_logs
 WHERE action = 'BLOCK'
@@ -123,46 +79,37 @@ LIMIT 100;
 **CloudTrail** – logs land in `<project>-<env>-cloudtrail-logs` and stream to the
 `/aws/cloudtrail/<project>-<env>` CloudWatch Logs group for real-time alerting.
 
-## Security hardening checklist
+---
 
-- [ ] Change `origin_verify_secret` to a random 32-char string and store in AWS Secrets Manager
-- [ ] Set `enable_deletion_protection = true` on the ALB in production
-- [ ] Narrow CloudTrail `data_resource` from all S3 to your specific bucket ARN
-- [ ] Add ALB access logs to an S3 bucket for full request visibility
-- [ ] Enable CloudFront access logging
-- [ ] Set up SNS notifications on the CloudWatch WAF alarm
-- [ ] Consider AWS Shield Advanced for DDoS protection on critical workloads
+## Domain & SSL Configuration
 
-## Tear down
+The application was initially accessible only via the default CloudFront domain. To expose it on a custom domain with HTTPS, three services were configured:
 
-```bash
-terraform destroy
-```
+- **AWS Certificate Manager** — Issued a public SSL certificate for `liewfuteck.com`, validated via DNS validation
+- **Amazon Route 53** — Created a hosted zone for `liewfuteck.com` with an A Alias record pointing to the CloudFront distribution
 
-> If `prevent_destroy = true` is set on the S3 bucket, empty it first:
-> `aws s3 rm s3://<bucket-name> --recursive`
+  ![Adding in the A record and CNAME record](./pictures/Route%2053%20records.png)
+
+- **SiteGround** — Replaced default nameservers with Route 53 nameservers, delegating DNS authority to AWS
+
+  ![Replacing Siteground nameservers with AWS's](./pictures/Siteground%20AWS%20nameservers.png)
+
+After adding the A record and CNAME record to Route 53, both `www.liewfuteck.com` and `liewfuteck.com` resolve securely to the CloudFront distribution with TLS terminating at the edge.
 
 ---
 
-## File structure
+## Security Hardening Checklist
 
-```
-terraform-aws-waf/
-├── main.tf                   # Root orchestration
-├── variables.tf              # Input variables
-├── outputs.tf                # Key outputs (CloudFront URL, WAF ARNs, etc.)
-├── terraform.tfvars.example  # Template – copy to terraform.tfvars
-└── modules/
-    ├── s3/         main.tf, variables.tf
-    ├── cloudfront/ main.tf, variables.tf
-    ├── alb/        main.tf, variables.tf
-    ├── waf/        main.tf, variables.tf   ← reused for both scopes
-    └── logging/    main.tf, variables.tf
-```
+### Completed
 
+- [x] AWS access keys and secrets excluded from Git via `.gitignore` (`.env`, `*.tfvars`, `*.tfstate` are all protected)
 
-## Security best practices
+### To-dos
 
-```
-AWS secrets (access keys) kept in AWS configuration file and never pushed online (Git repository)
-```
+- [ ] Store `origin_verify_secret` in AWS Secrets Manager and reference it via a Terraform data source instead of `terraform.tfvars`
+- [ ] Set `enable_deletion_protection = true` on the ALB in production (currently set to `false` for testing purposes)
+- [ ] Narrow CloudTrail `data_resource` from all S3 (`arn:aws:s3:::`) to the specific static assets bucket ARN
+- [ ] Add ALB access logs to an S3 bucket for full request visibility
+- [ ] Enable CloudFront access logging
+- [ ] Set up SNS notifications on the CloudWatch WAF blocked-requests alarm
+- [ ] Consider AWS Shield Advanced for DDoS protection on critical workloads
