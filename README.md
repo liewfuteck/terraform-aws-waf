@@ -23,7 +23,7 @@ CloudFront (CDN + TLS termination)
                                          ALB
 ```
 
-The following is the static site currently served through this infrastructure:
+The screenshot shows a static resume site served through this infrastructure, with a valid certificate and encrypted TLS connection:
 
 ![Resume hosted on liewfuteck.com via CloudFront and S3](./pictures/resume.png)
 
