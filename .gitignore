@@ -1,0 +1,36 @@
+# Local variable values — contain secrets; use terraform.tfvars.example as the template
+terraform.tfvars
+*.tfvars
+!*.tfvars.example
+
+# Terraform state — contains all resource IDs, ARNs, and sensitive outputs
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+
+# Saved plan files — contain the same sensitive data as state
+tfplan
+tfplan.json
+*.tfplan
+
+# Terraform working directory — provider binaries, module cache
+.terraform/
+.terraform.lock.hcl
+
+# Environment files — never commit credentials
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files (local machine overrides, not for sharing)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
