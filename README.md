@@ -57,7 +57,7 @@ The following is the static site currently served through this infrastructure:
 
 ### WAF Logging
 
-WAF has also been integrated with Kinesis Firehose, allowing for analysis of blocked requests.
+WAF logs are delivered to S3 through Amazon Kinesis Firehose, where they can be queried with Amazon Athena for threat analysis and audit purposes.
 
 ![AWS WAF and Kinesis Integration](./pictures/webapp-prod-kinesis-integration.png)
 ![Kinesis Firehose Dashboard](./pictures/Firehose%20stream%20metrics.png)
@@ -66,9 +66,8 @@ WAF has also been integrated with Kinesis Firehose, allowing for analysis of blo
 
 ## Viewing Logs
 
-**WAF logs** – stored in the `aws-waf-logs-<project>-<env>` S3 bucket. Query with Athena:
-
 ```sql
+-- Sample SQL statement
 SELECT timestamp, action, httprequest.clientip, httprequest.uri
 FROM waf_logs
 WHERE action = 'BLOCK'
@@ -76,8 +75,7 @@ ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-**CloudTrail** – logs land in `<project>-<env>-cloudtrail-logs` and stream to the
-`/aws/cloudtrail/<project>-<env>` CloudWatch Logs group for real-time alerting.
+CloudTrail logs are also stored in an S3 bucket, and can either be analysed using Athena or streamed to a CloudWatch log group for real-time alerting.
 
 ---
 
