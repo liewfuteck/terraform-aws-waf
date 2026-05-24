@@ -37,3 +37,6 @@ override.tf.json
 
 # Architecture diagram file
 graph.png
+
+# VS Code workspace file
+castlery.code-workspace
